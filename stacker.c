@@ -15,18 +15,8 @@
 #include <dlfcn.h>
 
 #include "common.h"
+#include "logging.h"
 #include "unwind.h"
-
-#if 0
-#define EXIT_WITH_FAILURE_STR(__str)       do {             \
-    char *s = __str ? __str : strerror(errno);              \
-    fprintf(stderr, "%s [line: %d]\n", s, __LINE__);        \
-    exit(EXIT_FAILURE);                                     \
-} while (0)
-
-#define EXIT_WITH_FAILURE       EXIT_WITH_FAILURE_STR(NULL)
-#define DEBUG(...)              fprintf(stderr, __VA_ARGS__)
-#endif
 
 
 #define MAX_STACK_DEPTH         128
@@ -67,6 +57,7 @@ int main(int argc, char *argv[])
 {
     pid_t pid;
 
+    logging_initialize(NULL, NULL);
     if (strcmp(argv[1], "self") == 0) {
         pid = getpid();
     } else {
@@ -95,26 +86,26 @@ int main(int argc, char *argv[])
     stack[depth++] = rip;
 
     while (rsp && rip) {
-        DEBUG("RSP: %p\tRIP: %p\n", rsp, rip);
+        INFO("RSP: %p\tRIP: %p", rsp, rip);
 
         void *libc_start_addr = get_start_addr(pid, "/lib/libc-2.11.2.so");
         unwind_prepare("/lib/libc-2.11.2.so");
 
         if (rip >= libc_start_addr) {
-            DEBUG("Looking in libc ELF\n");
+            DEBUG("Looking in libc ELF");
             rsp += unwind_find_caller_offset(pid, (void *)(rip - libc_start_addr));
         } else {
-            DEBUG("Looking in binary ELF\n");
+            DEBUG("Looking in binary ELF");
             void *bin_start_addr = get_start_addr(pid, "/bin/bash");
             unwind_prepare("/bin/bash");
             int32_t offset = unwind_find_caller_offset(pid, (void *)(rip - bin_start_addr));
-            DEBUG("Found %d bytes offset\n", offset);
+            DEBUG("Found %d bytes offset", offset);
             rsp += offset;
         }
         rip = (void *)ptrace(PTRACE_PEEKDATA, pid, rsp-8, NULL);
         stack[depth++] = rip;
     }
-    DEBUG("RSP: %p\tRIP: %p\n", rsp, rip);
+    DEBUG("RSP: %p\tRIP: %p", rsp, rip);
 
     if (ptrace(PTRACE_DETACH, pid, NULL, NULL) < 0) {
         EXIT_WITH_FAILURE;

@@ -8,7 +8,7 @@ unwind-info:
 
 stacker.o: common.h
 unwind.o: common.h
-stacker: stacker.o unwind.o
+stacker: stacker.o unwind.o logging.o
 
 clean:
 	rm -f stacker unwind-info *.o
