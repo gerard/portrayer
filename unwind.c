@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <assert.h>
 #include <elf.h>
 #include <dwarf.h>
 #include "common.h"
@@ -107,10 +108,6 @@ void decode_cfa_opcodes(int fd, off_t offset, uint32_t cfa_len, int32_t *stack_o
     off_t initial_offset = offset;
     *stack_offset = cie_cfa_offset;
 
-    if (unlikely(start_rip > process_rip)) {
-        EXIT_WITH_FAILURE_STR("Incorrect rip while decoding CFA");
-    }
-
     /* Again, this is full of LEB128 encoded types, and we are assuming
      * that these values are < 128 so they are equivalent to uint8_t */
     /* TODO: Lots of CFA opcodes missing... */
@@ -208,13 +205,12 @@ void decode_cie(int fd, uint32_t offset, uint32_t cie_len)
     initial_fd = fd;
 }
 
-int decode_fde(int fd, uint32_t offset, const void const *process_rip,
-               uint32_t fde_len, int32_t *stack_offset)
+int decode_fde_boundaries(int fd, uint32_t offset, uint32_t fde_len, void **bound_start, void **bound_end)
 {
     /* Assuming pcrel | sdata4 FDE encoding */
     uint32_t fde_id     = POP_TYPE(fd, offset, uint32_t);
 
-    if (fde_id == 0) {
+    if (unlikely(fde_id == 0)) {
         /* This is a CIE.  Parse it and skip to the next FDE. */
         offset -= sizeof(uint32_t);
         decode_cie(fd, offset, fde_len);
@@ -224,27 +220,28 @@ int decode_fde(int fd, uint32_t offset, const void const *process_rip,
     void *start_off     = (void *)(uint64_t)offset;
     int32_t fde_start   = POP_TYPE(fd, offset, int32_t);
     uint32_t fde_off    = POP_TYPE(fd, offset, uint32_t);
-    void *fde_rip_start = start_off + fde_start;
+    *bound_start = start_off + fde_start;
+    *bound_end = *bound_start + fde_off;
+    return 1;
+}
 
-    if (process_rip >= fde_rip_start && process_rip < (fde_rip_start + fde_off)) {
-        DEBUG("0x%08x +0x%04x [ID: %x LEN:%x] Looking for %p", (uint32_t)(uint64_t)fde_rip_start, fde_off, 
-                                                                 fde_id, fde_len, process_rip);
-        DEBUG("%p %p %p", fde_rip_start, process_rip, fde_rip_start + fde_off);
-        /* Found the fde belonging to this frame */
-        DEBUG("Found FDE: 0x%08x +0x%04x", fde_rip_start, fde_off);
-        uint8_t augdata_len = POP_TYPE(fd, offset, uint8_t);
-        if (augdata_len != 0) {
-            EXIT_WITH_FAILURE_STR("Unsupported augmentation data found in FDE");
-        }
+int decode_fde_cfa(int fd, uint32_t offset, uint32_t fde_len, uint32_t *cfa, uint32_t *cfa_len)
+{
+    /* Assuming pcrel | sdata4 FDE encoding */
+    uint32_t fde_id     = POP_TYPE(fd, offset, uint32_t);
+    assert(fde_id != 0);
+    int32_t fde_start   = POP_TYPE(fd, offset, int32_t);
+    uint32_t fde_off    = POP_TYPE(fd, offset, uint32_t);
 
-        //uint32_t cfa_len = (offset - (uint32_t)(start_off + 2));
-        uint32_t cfa_len = fde_len - 13;
-        *stack_offset = cie_cfa_offset;      /* Initialize to CIE CFA opcode values */
-        decode_cfa_opcodes(fd, offset, cfa_len, stack_offset, fde_rip_start, process_rip);
-        return 1;
-    } else {
-        return 0;
+
+    uint8_t augdata_len = POP_TYPE(fd, offset, uint8_t);
+    if (augdata_len != 0) {
+        EXIT_WITH_FAILURE_STR("Unsupported augmentation data found in FDE");
     }
+
+    *cfa_len = fde_len - 13;
+    *cfa = offset;
+    return 1;
 }
 
 int32_t unwind_find_caller_offset(pid_t pid, void *rip)
@@ -255,11 +252,22 @@ int32_t unwind_find_caller_offset(pid_t pid, void *rip)
     DEBUG("Analyzing total of %d FDEs", (int)initial_fde_count);
     for (int j = 0; j < initial_fde_count; j++) {
         uint32_t fde_len = POP_TYPE(fd, offset, uint32_t);
-        int32_t stack_offset;
 
-        if (decode_fde(fd, offset, rip, fde_len, &stack_offset)) {
-            DEBUG("Success");
-            return stack_offset;
+        void *start = NULL;
+        void *end = NULL;
+        if (decode_fde_boundaries(fd, offset, fde_len, &start, &end)) {
+            if (rip >= start && rip < end) {
+                uint32_t cfa;
+                uint32_t cfa_len;
+                if (!decode_fde_cfa(fd, offset, fde_len, &cfa, &cfa_len)) {
+                    ERR("Failed to decode FDE");
+                }
+                int32_t stack_offset = cie_cfa_offset;
+                decode_cfa_opcodes(fd, cfa, cfa_len, &stack_offset, start, rip);
+                return stack_offset;
+            }
+        } else {
+            /* This was a cie, not a FDE */
         }
         offset += fde_len;
     }
